@@ -26,3 +26,12 @@ class Layer:
         self.last_z = z
         self.last_output = a
         return a
+    def backward(self, output_gradient, learning_rate):
+        activation_derivative = self.activation.derivative(self.last_z)
+        delta = self.backend.element_wise_multiply(output_gradient, activation_derivative)
+        weight_gradient = self.backend.matmul(delta, self.last_input.transpose())
+        bias_gradient = delta
+        input_gradient = self.backend.matmul(self.weight_matrix.transpose(), delta)
+        self.weight_matrix = self.backend.add(self.weight_matrix, self.backend.scalar_multiplication(weight_gradient, -learning_rate))
+        self.bias_matrix = self.backend.add(self.bias_matrix, self.backend.scalar_multiplication(bias_gradient, -learning_rate))
+        return input_gradient
