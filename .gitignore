@@ -1,0 +1,4 @@
+knowledge.json
+__pycache__/
+.vscode/
+test_run.py
