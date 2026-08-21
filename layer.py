@@ -22,4 +22,7 @@ class Layer:
         z = self.backend.matmul(self.weight_matrix, inputs)
         z = self.backend.add(z, self.bias_matrix)
         a = self.backend.apply_activation(z, self.activation)
+        self.last_input = inputs
+        self.last_z = z
+        self.last_output = a
         return a

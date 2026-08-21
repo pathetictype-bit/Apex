@@ -57,6 +57,14 @@ class Matrix:
                 new_row.append(function(value))
             result.append(new_row)
         return Matrix(result)
+    def element_wise_multiply(self, other):
+        result = []
+        for i in range(self.rows):
+            rows = []
+            for j in range(self.columns):
+                rows.append(self.data[i][j] * other.data[i][j])
+            result.append(rows)
+        return Matrix(result)
     def __str__(self):
         rows = []
 
