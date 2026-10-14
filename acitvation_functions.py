@@ -20,18 +20,12 @@ class tanh:
     def __call__(self, x):
         return math.tanh(x)
     def derivative(self, x):
-        return 1 - self.__call__(x)**2
+        return 1 - x**2
 class linear:
     def __call__(self, x):
         return x
     def derivative(self, x):
         return 1
-class softmax:
-    def __call__(self, scores):
-        max_output = max(scores)
-        exponentials = [math.exp(score - max_output) for score in scores]
-        total = sum(exponentials)
-        return [value/total for value in exponentials]
 class step:
     def __call__(self, x):
         return 1 if x >= 0 else 0

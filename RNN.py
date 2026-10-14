@@ -1,119 +1,67 @@
-import random
-from acitvation_functions import tanh_activation, tanh_derivative
+import math
+from acitvation_functions import tanh
 
-class rnn:
-    def __init__(self, input_size, hidden_size):
-        self.history = []
+class RNN:
+    def __init__(self, input_size, hidden_size, output_size, backend):
         self.input_size = input_size
         self.hidden_size = hidden_size
+        self.output_size = output_size
 
-        self.input_weights = [[random.uniform(-1.0, 1.0) for _ in  range(input_size)] for _ in range(hidden_size)]
-        self.hidden_weights = [[random.uniform(-1.0, 1.0) for _ in range(hidden_size)] for _ in range(hidden_size)]
-        self.biases = [random.uniform(-1.0, 1.0) for _ in range(hidden_size)]
-        self.hidden_state = [0] * hidden_size
+        self.Wxh = backend.randn(hidden_size, input_size)
 
-    def forward(self, inputs, store_history = True):
-        new_hidden_state = []
-        z = []
-        for i in range(self.hidden_size):
-            total = 0
-            for j in range(self.input_size):
-                total += inputs[j] * self.input_weights[i][j]
+        self.Whh = backend.scalar_multiplication(
+            backend.randn(hidden_size, hidden_size),
+            0.5
+        )
 
-            for j in range(self.hidden_size):
-                total += self.hidden_state[j] * self.hidden_weights[i][j]
+        self.Why = backend.randn(output_size, hidden_size)
 
-            total += self.biases[i]
-            z.append(total)
-            new_hidden_state.append(tanh_activation(total))
-        h_prev = self.hidden_state.copy()
+        self.bh = backend.zeros(hidden_size, 1)
+        self.by = backend.zeros(output_size, 1)
 
-        if store_history:
-            self.history.append({"inputs" : inputs.copy(), "h_prev" : h_prev.copy(), "z" : z.copy(), "h" : new_hidden_state.copy()})
+        self.backend = backend
+        self.activation_function = tanh()
+    def forward(self, inputs, h_prev):
+        previous_hidden_state = []
+        hidden_states = []
+        outputs = []
+        h = h_prev
+        for x in inputs:
+            previous_hidden_state.append(h)
+            hidden_inputs = self.backend.add(
+                    self.backend.matmul(self.Wxh, x),
+                    self.backend.matmul(self.Whh, h),
+                )
+            
+            hidden_inputs = self.backend.add(hidden_inputs, self.bh)
+            
+            h = self.backend.apply_activation(hidden_inputs, function=self.activation_function)
+            y = self.backend.add(
+                    self.backend.matmul(self.Why, h),
+                    self.by
+                )
+            hidden_states.append(h)
+            outputs.append(y)
+        return hidden_states, outputs, previous_hidden_state
+    def backward(self, inputs, hidden_states, previous_hidden_state, doutputs):
+        dinputs = [None] * len(inputs)
+        dWxh = self.backend.zeros(self.hidden_size, self.input_size)
+        dWhh = self.backend.zeros(self.hidden_size, self.hidden_size)
+        dbh = self.backend.zeros(self.hidden_size, 1)
+        dh_next = self.backend.zeros(self.hidden_size, 1)
 
-        self.hidden_state = new_hidden_state
-        return self.hidden_state
+        for t in reversed(range(len(inputs))):
+            dh = doutputs[t]
+            if dh is None:
+                dh = self.backend.zeros(self.hidden_size, 1)
 
-    def backward(self, gradients):
-        input_weight_gradients = [
-            [0 for _ in range(self.input_size)]
-            for _ in range(self.hidden_size)
-        ]
-        hidden_weight_gradients = [
-            [0 for _ in range(self.hidden_size)]
-            for _ in range(self.hidden_size)
-        ]
-        bias_gradients = [0 for _ in range(self.hidden_size)]
+            dh = self.backend.add(dh, dh_next)
+            dh_raw = self.backend.apply_activation_derivative(hidden_states[t], function=self.activation_function)
+            dh_raw = self.backend.element_wise_multiply(dh_raw, dh)
+            dinputs[t] = self.backend.matmul(self.Wxh.transpose(), dh_raw)
+            dbh = self.backend.add(dbh, dh_raw)
+            dWxh = self.backend.add(dWxh, self.backend.matmul(dh_raw, inputs[t].transpose()))
+            dWhh = self.backend.add(dWhh, self.backend.matmul(dh_raw, previous_hidden_state[t].transpose()))
+            dh_next = self.backend.matmul(self.Whh.transpose(), dh_raw)
 
-        dh_next = [0 for _ in range(self.hidden_size)]
-
-        for time_step in reversed(range(len(self.history))):
-            step = self.history[time_step]
-
-            inputs = step["inputs"]
-            h_prev = step["h_prev"]
-            h = step["h"]
-
-            dh = gradients[time_step]
-
-            dh_total = [
-                dh[i] + dh_next[i]
-                for i in range(self.hidden_size)
-            ]
-
-            dL_dz = [
-                dh_total[i] * (1 - h[i] ** 2)
-                for i in range(self.hidden_size)
-            ]
-
-            for i in range(self.hidden_size):
-                for j in range(self.input_size):
-                    input_weight_gradients[i][j] += dL_dz[i] * inputs[j]
-
-            for i in range(self.hidden_size):
-                for j in range(self.hidden_size):
-                    hidden_weight_gradients[i][j] += dL_dz[i] * h_prev[j]
-
-            for i in range(self.hidden_size):
-                bias_gradients[i] += dL_dz[i]
-
-
-            new_dh_next = [0 for _ in range(self.hidden_size)]
-
-            for i in range(self.hidden_size):
-                for j in range(self.hidden_size):
-                    new_dh_next[j] += self.hidden_weights[i][j] * dL_dz[i]
-
-            dh_next = new_dh_next
-
-        return {
-            "input_weight_gradients": input_weight_gradients,
-            "hidden_weight_gradients": hidden_weight_gradients,
-            "bias_gradients": bias_gradients,
-        }
-
-    def update_parameter(self, gradient, learning_rate):
-        input_weight_gradients = gradient["input_weight_gradients"]
-        hidden_weight_gradients = gradient["hidden_weight_gradients"]
-        bias_gradients = gradient["bias_gradients"]
-
-        for i in range(self.hidden_size):
-            for j in range(self.input_size):
-                self.input_weights[i][j] -= learning_rate * input_weight_gradients[i][j]
-        for i in range(self.hidden_size):
-            for j in range(self.hidden_size):
-                self.hidden_weights[i][j] -= learning_rate * hidden_weight_gradients[i][j]
-        for i in range(self.hidden_size):
-            self.biases[i] -= learning_rate * bias_gradients[i]
-
-    def get_weights(self):
-        return {"input_weights" : self.input_weights,  
-                "hidden_weights" : self.hidden_weights,
-                "biases" : self.biases}
-
-    def set_weights(self, data):
-        self.input_weights = data["input_weights"]
-        self.hidden_weights = data["hidden_weights"]
-        self.biases = data["biases"]
-    
-        
+        return dWxh, dWhh, dbh, dinputs
