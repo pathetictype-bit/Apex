@@ -1,0 +1,30 @@
+[
+  {
+    "query": "Who are you?",
+    "collection_ids": [
+      "collection_1",
+      "collection_2"
+    ]
+  },
+  {
+    "query": "What are you?",
+    "collection_ids": [
+      "collection_2"
+    ]
+  },
+  {
+    "query": "What is your identity?",
+    "collection_ids": [
+      "collection_1",
+      "collection_2"
+    ]
+  },
+  {
+    "query": "Who made you?",
+    "collection_id": "collection_1"
+  },
+  {
+    "query": "What is your purpose?",
+    "collection_id": "collection_3"
+  }
+]
