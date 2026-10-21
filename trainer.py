@@ -11,6 +11,10 @@ class Trainer:
             self.model.forward(inputs)
         losses = []
         doutputs = []
+        supervised_target_count = sum(target is not None for target in targets)
+        if supervised_target_count == 0:
+            raise ValueError("Training step has no supervised targets.")
+        gradient_scale = 1.0 / supervised_target_count
 
         for i, (output, target) in enumerate(zip(network_outputs, targets)):
             if target is None:
@@ -21,22 +25,27 @@ class Trainer:
                 doutputs.append(self.backend.zeros(output_rows, output_columns))
                 continue
 
-            loss, doutput = self.backend.loss(output, target)
+            loss, doutput = self.backend.loss(
+                output,
+                target,
+                gradient_scale=gradient_scale,
+            )
 
 
 
-            if hasattr(doutput, "to_cpu"):
-                doutput_cpu = doutput.to_cpu()
-            else:
-                doutput_cpu = doutput.data
+            if not getattr(self.backend, "loss_validates_gradient", False):
+                if hasattr(doutput, "to_cpu"):
+                    doutput_cpu = doutput.to_cpu()
+                else:
+                    doutput_cpu = doutput.data
 
-            if not all(
-                math.isfinite(value)
-                for row in doutput_cpu
-                for value in row
-            ):
-                print("🚨 NaN/Inf appeared in DOUTPUT")
-                raise RuntimeError("Non-finite doutput detected")
+                if not all(
+                    math.isfinite(value)
+                    for row in doutput_cpu
+                    for value in row
+                ):
+                    print("Non-finite output gradient detected.")
+                    raise RuntimeError("Non-finite doutput detected")
 
             losses.append(loss)
             doutputs.append(doutput)

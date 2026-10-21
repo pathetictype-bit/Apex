@@ -8,15 +8,25 @@ class Apex_model:
 
     def _as_rnn_inputs(self, embeddings):
         rnn_inputs = []
-        for row in embeddings.data:
+        rows = self._matrix_rows(embeddings)
+        for row in rows:
             rnn_inputs.append(self.backend.create_matrix([[value] for value in row]))
         return rnn_inputs
+
+    @staticmethod
+    def _matrix_rows(matrix):
+        rows = matrix.to_cpu() if hasattr(matrix, "to_cpu") else matrix.data
+        return rows.tolist() if hasattr(rows, "tolist") else rows
 
     def forward(self, inputs):
         h_prev = self.backend.zeros(self.rnn.hidden_size, 1)
         embeddings = self.embedding.forward(inputs)
         self._last_rnn_inputs = self._as_rnn_inputs(embeddings)
-        hidden_states, rnn_outputs, previous_hidden_state = self.rnn.forward(self._last_rnn_inputs, h_prev)
+        hidden_states, _, previous_hidden_state = self.rnn.forward(
+            self._last_rnn_inputs,
+            h_prev,
+            compute_outputs=False,
+        )
         network_outputs = []
         network_caches = []
         for hidden in hidden_states:
@@ -35,15 +45,20 @@ class Apex_model:
 
         embeddings = self.embedding.forward(token_ids)
         rnn_inputs = self._as_rnn_inputs(embeddings)
-        hidden_states, _, _ = self.rnn.forward(rnn_inputs, h_prev)
+        hidden_states, _, _ = self.rnn.forward(
+            rnn_inputs,
+            h_prev,
+            compute_outputs=False,
+        )
         logits, _ = self.network.forward(hidden_states[-1])
 
-        if hasattr(logits, 'data') and logits.data:
-            flat_logits = [value for row in logits.data for value in row]
+        logits_rows = self._matrix_rows(logits)
+        if logits_rows:
+            flat_logits = [value for row in logits_rows for value in row]
             return max(range(len(flat_logits)), key=lambda idx: flat_logits[idx])
         return 0
 
-    def generate(self, prompt, tokenizer, max_length=20):
+    def generate(self, prompt, tokenizer, max_length=20, end_token_id=None):
         if isinstance(prompt, str):
             prompt_ids = tokenizer.encode(prompt)
         else:
@@ -58,18 +73,28 @@ class Apex_model:
         for token_id in prompt_ids:
             input_vector = self.embedding.forward([token_id])
             rnn_inputs = self._as_rnn_inputs(input_vector)
-            hidden_states, _, _ = self.rnn.forward(rnn_inputs, h_prev)
+            hidden_states, _, _ = self.rnn.forward(
+                rnn_inputs,
+                h_prev,
+                compute_outputs=False,
+            )
             h_prev = hidden_states[-1]
 
         for _ in range(max_length):
             logits, _ = self.network.forward(h_prev)
-            flat_logits = [value for row in logits.data for value in row]
+            flat_logits = [value for row in self._matrix_rows(logits) for value in row]
             next_token = max(range(len(flat_logits)), key=lambda idx: flat_logits[idx])
+            if next_token == end_token_id:
+                break
             generated_ids.append(next_token)
 
             input_vector = self.embedding.forward([next_token])
             rnn_inputs = self._as_rnn_inputs(input_vector)
-            hidden_states, _, _ = self.rnn.forward(rnn_inputs, h_prev)
+            hidden_states, _, _ = self.rnn.forward(
+                rnn_inputs,
+                h_prev,
+                compute_outputs=False,
+            )
             h_prev = hidden_states[-1]
 
         return tokenizer.decode(generated_ids)
@@ -106,7 +131,8 @@ class Apex_model:
         for grad in dinputs:
             if grad is None:
                 continue
-            dinput_matrix.append([row[0] for row in grad.data])
+            grad_rows = self._matrix_rows(grad)
+            dinput_matrix.append([row[0] for row in grad_rows])
 
         if dinput_matrix:
             dinput_matrix = self.backend.create_matrix(dinput_matrix)
@@ -152,7 +178,11 @@ class Apex_model:
             ]
             self.network.update_parameters(clipped_weight_gradients, clipped_bias_gradients, learning_rate)
 
-        if embedding_gradients is not None and hasattr(self.embedding, 'embedding_matrix'):
+        if (
+            embedding_gradients is not None
+            and getattr(self.embedding, "trainable", True)
+            and hasattr(self.embedding, "embedding_matrix")
+        ):
             embedding_gradients = self.backend.clip(
                 embedding_gradients,
                 gradient_minimum,

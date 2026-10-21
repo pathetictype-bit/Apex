@@ -23,8 +23,8 @@ class GPU_matrix:
         transposed_data = cuda.device_array((self.shape[1], self.shape[0]), dtype=self.data.dtype)
         threads_per_block = (16, 16)
         blocks_per_grid = (
-            (self.shape[1] + threads_per_block[0] - 1) // threads_per_block[0],
-            (self.shape[0] + threads_per_block[1] - 1) // threads_per_block[1]
+            (self.shape[0] + threads_per_block[0] - 1) // threads_per_block[0],
+            (self.shape[1] + threads_per_block[1] - 1) // threads_per_block[1]
         )
         transpose_kernel[blocks_per_grid, threads_per_block](self.data, transposed_data)
         return GPU_matrix(transposed_data, from_gpu=True)

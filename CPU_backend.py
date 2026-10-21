@@ -2,6 +2,7 @@ import math
 import random
 from Matrix import Matrix
 class CPUBackend:
+    name = "CPU"
 
     def matmul(self, a, b):
         return a.multiply(b)
@@ -36,7 +37,14 @@ class CPUBackend:
         return matrix.apply_function(function.derivative)
     def subtract(self, a, b):
         return a.subtract(b)
-    def loss(self, prediction, target):
+    def loss(self, prediction, target, gradient_scale=1.0):
+        if (
+            isinstance(gradient_scale, bool)
+            or not isinstance(gradient_scale, (int, float))
+            or not math.isfinite(gradient_scale)
+            or gradient_scale <= 0.0
+        ):
+            raise ValueError("gradient_scale must be a finite positive number.")
         # Network outputs are already softmax probabilities.
         # Supports either a target class index (int) or a one-hot/soft target matrix.
         prob_data = prediction.data
@@ -47,7 +55,7 @@ class CPUBackend:
             grad_flat = []
             for p, t in zip([value for row in prob_data for value in row], target_flat):
                 loss -= t * math.log(p + 1e-9)
-                grad_flat.append(p - t)
+                grad_flat.append((p - t) * gradient_scale)
             grad_matrix = [
                 grad_flat[i * len(prob_data[0]): (i + 1) * len(prob_data[0])]
                 for i in range(len(prob_data))
@@ -61,7 +69,7 @@ class CPUBackend:
         grad_flat = [0.0 for _ in flat_probs]
         grad_flat[target_index] = 1.0
         for i, (p, g) in enumerate(zip(flat_probs, grad_flat)):
-            grad_flat[i] = p - g
+            grad_flat[i] = (p - g) * gradient_scale
 
         grad_matrix = [
             grad_flat[i * len(prob_data[0]): (i + 1) * len(prob_data[0])]

@@ -1,5 +1,10 @@
+UNKNOWN_TOKEN = "<UNK>"
+EOS_TOKEN = "<EOS>"
+
+
 class Tokenizer:
     def __init__(self):
+        self.encoding = "character_bpe_v1"
         self.merges = []
         self.tokenized_texts = []
         self.vocab = []
@@ -7,6 +12,13 @@ class Tokenizer:
         self.id_to_token_map = {}
 
     def train(self, tokenized_texts, num_merges):
+        base_tokens = {
+            token
+            for tokens in tokenized_texts
+            for token in tokens
+        }
+        learned_tokens = set(base_tokens)
+
         for _ in range(num_merges):
             pair_counts = count_pairs(tokenized_texts)
 
@@ -14,17 +26,20 @@ class Tokenizer:
                 break
 
             pair = most_frequent_pairs(pair_counts)
-
             self.merges.append(pair)
-
             tokenized_texts = merge_pairs(
                 tokenized_texts,
                 pair
             )
+            learned_tokens.add(pair[0] + pair[1])
 
-        # The tokens have now changed because of BPE.
         self.tokenized_texts = tokenized_texts
-        self.vocab = self.build_vocab()
+        self.vocab = sorted(learned_tokens)
+        self.vocab.extend(
+            token
+            for token in (UNKNOWN_TOKEN, EOS_TOKEN)
+            if token not in learned_tokens
+        )
 
         self.token_to_id_map = {
             token: idx
@@ -37,8 +52,11 @@ class Tokenizer:
         }
 
     def load_state(self, state):
+        self.encoding = state.get("encoding", "character_bpe_v1")
         self.merges = [tuple(pair) for pair in state.get("merges", [])]
         self.vocab = list(state.get("vocab", []))
+        if UNKNOWN_TOKEN not in self.vocab:
+            self.vocab.append(UNKNOWN_TOKEN)
         self.token_to_id_map = {
             token: idx
             for idx, token in enumerate(self.vocab)
@@ -47,6 +65,15 @@ class Tokenizer:
             idx: token
             for idx, token in enumerate(self.vocab)
         }
+
+    def add_special_token(self, token):
+        if not isinstance(token, str) or not token:
+            raise ValueError("Special tokens must be non-empty strings.")
+        if token not in self.token_to_id_map:
+            self.vocab.append(token)
+            token_id = len(self.vocab) - 1
+            self.token_to_id_map[token] = token_id
+            self.id_to_token_map[token_id] = token
 
     def build_vocab(self):
         vocab = set()
@@ -68,7 +95,7 @@ class Tokenizer:
         tokens = self.tokenize(text)
 
         return [
-            self.token_to_id_map[token]
+            self.token_to_id_map.get(token, self.token_to_id_map[UNKNOWN_TOKEN])
             for token in tokens
         ]
 
@@ -100,13 +127,9 @@ def load_dataset(filename):
 def target_length_for_prompt(prompt, dataset, tokenizer, default=12):
     for input_text, target_text in dataset:
         if input_text == prompt:
-            target_tokens = tokenizer.tokenize(target_text)
-
-            if all(
-                token in tokenizer.token_to_id_map
-                for token in target_tokens
-            ):
-                return len(target_tokens)
+            target_ids = tokenizer.encode(target_text)
+            if target_ids:
+                return len(target_ids)
 
     return default
 

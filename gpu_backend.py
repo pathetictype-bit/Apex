@@ -1,7 +1,6 @@
 import math
 import numpy as np
 from numba import cuda
-from Matrix import Matrix
 from gpu_matrix import GPU_matrix
 
 @cuda.jit
@@ -31,6 +30,22 @@ def matmul_kernel(a, b, c):
             total += a[row][k] * b[k][col]
 
         c[row][col] = total
+
+
+@cuda.jit
+def rnn_hidden_step_kernel(wxh, whh, bias, x, previous_hidden, output):
+    hidden_index = cuda.grid(1)
+    if hidden_index < output.shape[0]:
+        total = bias[hidden_index][0]
+        for input_index in range(wxh.shape[1]):
+            total += wxh[hidden_index][input_index] * x[input_index][0]
+        for previous_index in range(whh.shape[1]):
+            total += (
+                whh[hidden_index][previous_index]
+                * previous_hidden[previous_index][0]
+            )
+        output[hidden_index][0] = math.tanh(total)
+
 
 @cuda.jit
 def element_wise_multiply_kernel(a, b, c):
@@ -77,7 +92,9 @@ def activation_derivative_kernel(matrix, activation_kind, result):
         elif activation_kind == 2:
             result[row][col] = 1.0 if value > 0.0 else 0.01
         elif activation_kind == 3:
-            result[row][col] = 1.0 - math.tanh(value) ** 2
+            # RNN.backward supplies the already activated hidden state, as
+            # does tanh.derivative in the CPU backend.
+            result[row][col] = 1.0 - value ** 2
         elif activation_kind == 4:
             result[row][col] = math.exp(value) if value < 0.0 else 1.0
         elif activation_kind == 5:
@@ -86,94 +103,70 @@ def activation_derivative_kernel(matrix, activation_kind, result):
             result[row][col] = 1.0
 
 @cuda.jit
-def softmax_max_kernel(matrix, maximum):
+def softmax_kernel(matrix, result):
     thread_id = cuda.threadIdx.x
     stride = cuda.blockDim.x
     shared_values = cuda.shared.array(1024, dtype=np.float32)
     element_count = matrix.shape[0] * matrix.shape[1]
 
-    local_maximum = -math.inf
+    if thread_id == 0:
+        maximum = -math.inf
+        for index in range(element_count):
+            row = index // matrix.shape[1]
+            col = index % matrix.shape[1]
+            if matrix[row][col] > maximum:
+                maximum = matrix[row][col]
+
+        total = 0.0
+        for index in range(element_count):
+            row = index // matrix.shape[1]
+            col = index % matrix.shape[1]
+            total += math.exp(matrix[row][col] - maximum)
+        shared_values[0] = maximum
+        shared_values[1] = total
+    cuda.syncthreads()
+
     for index in range(thread_id, element_count, stride):
         row = index // matrix.shape[1]
         col = index % matrix.shape[1]
-        value = matrix[row][col]
-        if value > local_maximum:
-            local_maximum = value
+        result[row][col] = (
+            math.exp(matrix[row][col] - shared_values[0])
+            / shared_values[1]
+        )
 
-    shared_values[thread_id] = local_maximum
-    cuda.syncthreads()
-
-    offset = stride // 2
-    while offset > 0:
-        if thread_id < offset and shared_values[thread_id + offset] > shared_values[thread_id]:
-            shared_values[thread_id] = shared_values[thread_id + offset]
-        cuda.syncthreads()
-        offset //= 2
-
-    if thread_id == 0:
-        maximum[0] = shared_values[0]
 
 @cuda.jit
-def softmax_sum_kernel(matrix, maximum, total):
-    thread_id = cuda.threadIdx.x
-    stride = cuda.blockDim.x
-    shared_values = cuda.shared.array(1024, dtype=np.float32)
-    element_count = matrix.shape[0] * matrix.shape[1]
-    matrix_maximum = maximum[0]
-
-    local_total = np.float32(0.0)
-    for index in range(thread_id, element_count, stride):
-        row = index // matrix.shape[1]
-        col = index % matrix.shape[1]
-        local_total += math.exp(matrix[row][col] - matrix_maximum)
-
-    shared_values[thread_id] = local_total
-    cuda.syncthreads()
-
-    offset = stride // 2
-    while offset > 0:
-        if thread_id < offset:
-            shared_values[thread_id] += shared_values[thread_id + offset]
-        cuda.syncthreads()
-        offset //= 2
-
-    if thread_id == 0:
-        total[0] = shared_values[0]
-
-@cuda.jit
-def softmax_normalize_kernel(matrix, maximum, total, result):
-    row, col = cuda.grid(2)
-
-    if row < result.shape[0] and col < result.shape[1]:
-        result[row][col] = math.exp(matrix[row][col] - maximum[0]) / total[0]
-
-@cuda.jit
-def loss_kernel(prediction, target, loss):
-    thread_id = cuda.threadIdx.x
-    stride = cuda.blockDim.x
-    shared_values = cuda.shared.array(1024, dtype=np.float32)
+def loss_and_gradient_kernel(
+    prediction,
+    target,
+    gradient_scale,
+    gradient,
+    loss,
+):
+    index = cuda.grid(1)
     element_count = prediction.shape[0] * prediction.shape[1]
 
-    local_loss = np.float32(0.0)
-    for index in range(thread_id, element_count, stride):
+    if index == 0:
+        target_row = target // prediction.shape[1]
+        target_col = target % prediction.shape[1]
+        probability = prediction[target_row][target_col]
+        loss_value = -math.log(probability + 1e-9)
+        for value_index in range(element_count):
+            row = value_index // prediction.shape[1]
+            col = value_index % prediction.shape[1]
+            if not math.isfinite(prediction[row][col]):
+                loss_value = math.nan
+                break
+        loss[0] = loss_value
+
+    if index < element_count:
         row = index // prediction.shape[1]
         col = index % prediction.shape[1]
-        p = prediction[row][col]
-        t = target[row][col]
-        local_loss += -t * math.log(p + 1e-9)
+        gradient[row][col] = (
+            prediction[row][col] - (1.0 if index == target else 0.0)
+        ) * gradient_scale
 
-    shared_values[thread_id] = local_loss
-    cuda.syncthreads()
 
-    offset = stride // 2
-    while offset > 0:
-        if thread_id < offset:
-            shared_values[thread_id] += shared_values[thread_id + offset]
-        cuda.syncthreads()
-        offset //= 2
-
-    if thread_id == 0:
-        loss[0] = shared_values[0]
 @cuda.jit
 def embedding_lookup_kernel(embedding_matrix, token_ids, result):
     row, col = cuda.grid(2)
@@ -202,9 +195,15 @@ def clip_kernel(matrix, minimum, maximum, result):
         result[row][col] = max(minimum, min(value, maximum))
         
 class GPUBackend:
+    name = "GPU (Numba CUDA)"
+    loss_validates_gradient = True
+
+    @staticmethod
+    def is_available():
+        return cuda.is_available()
 
     def __init__(self):
-        self.available = cuda.is_available()
+        self.available = self.is_available()
 
         if not self.available:
             raise RuntimeError("CUDA is not available.")
@@ -287,6 +286,30 @@ class GPUBackend:
 
         return GPU_matrix(c_gpu, from_gpu=True)
 
+    def rnn_forward_step(self, wxh, whh, bias, x, previous_hidden):
+        wxh_gpu = wxh.to_gpu()
+        whh_gpu = whh.to_gpu()
+        bias_gpu = bias.to_gpu()
+        x_gpu = x.to_gpu()
+        previous_hidden_gpu = previous_hidden.to_gpu()
+        output_gpu = cuda.device_array(
+            (wxh.shape[0], 1),
+            dtype=np.float32,
+        )
+        threads_per_block = 128
+        blocks_per_grid = (
+            wxh.shape[0] + threads_per_block - 1
+        ) // threads_per_block
+        rnn_hidden_step_kernel[blocks_per_grid, threads_per_block](
+            wxh_gpu,
+            whh_gpu,
+            bias_gpu,
+            x_gpu,
+            previous_hidden_gpu,
+            output_gpu,
+        )
+        return GPU_matrix(output_gpu, from_gpu=True)
+
     def apply_activation(self, matrix, function):
         matrix_gpu = matrix.to_gpu()
         result_gpu = cuda.device_array_like(matrix_gpu)
@@ -331,25 +354,7 @@ class GPUBackend:
     def apply_softmax(self, matrix):
         matrix_gpu = matrix.to_gpu()
         result_gpu = cuda.device_array_like(matrix_gpu)
-        maximum_gpu = cuda.device_array(1, dtype=np.float32)
-        total_gpu = cuda.device_array(1, dtype=np.float32)
-
-        reduction_threads = 1024
-        softmax_max_kernel[1, reduction_threads](matrix_gpu, maximum_gpu)
-        softmax_sum_kernel[1, reduction_threads](matrix_gpu, maximum_gpu, total_gpu)
-
-        threads_per_block = (16, 16)
-        blocks_per_grid = (
-            (matrix.shape[0] + threads_per_block[0] - 1) // threads_per_block[0],
-            (matrix.shape[1] + threads_per_block[1] - 1) // threads_per_block[1]
-        )
-
-        softmax_normalize_kernel[blocks_per_grid, threads_per_block](
-            matrix_gpu,
-            maximum_gpu,
-            total_gpu,
-            result_gpu
-        )
+        softmax_kernel[1, 512](matrix_gpu, result_gpu)
 
         return GPU_matrix(result_gpu, from_gpu=True)
     def create_matrix(self, data):
@@ -391,39 +396,40 @@ class GPUBackend:
         )
 
         return GPU_matrix(c_gpu, from_gpu=True)
-    def loss(self, prediction, target):
+    def loss(self, prediction, target, gradient_scale=1.0):
+        if (
+            isinstance(target, bool)
+            or not isinstance(target, int)
+            or target < 0
+            or target >= prediction.shape[0] * prediction.shape[1]
+        ):
+            raise ValueError("target class index is outside the prediction.")
+        if (
+            isinstance(gradient_scale, bool)
+            or not isinstance(gradient_scale, (int, float))
+            or not math.isfinite(gradient_scale)
+            or gradient_scale <= 0.0
+        ):
+            raise ValueError("gradient_scale must be a finite positive number.")
         prediction_gpu = prediction.to_gpu()
-
-        # Create one-hot target for the loss calculation only
-        target_data = [[0.0] for _ in range(prediction.shape[0])]
-        target_data[target][0] = 1.0
-
-        target_matrix = GPU_matrix(target_data)
-        target_gpu = target_matrix.to_gpu()
-
+        gradient_gpu = cuda.device_array_like(prediction_gpu)
         loss_gpu = cuda.device_array(1, dtype=np.float32)
-
-        reduction_threads = 1024
-        loss_kernel[1, reduction_threads](
+        threads_per_block = 256
+        element_count = prediction.shape[0] * prediction.shape[1]
+        blocks_per_grid = (element_count + threads_per_block - 1) // threads_per_block
+        loss_and_gradient_kernel[blocks_per_grid, threads_per_block](
             prediction_gpu,
-            target_gpu,
+            target,
+            np.float32(gradient_scale),
+            gradient_gpu,
             loss_gpu
         )
-
         loss_value = loss_gpu.copy_to_host()[0]
-
-        # Softmax + cross-entropy gradient
-        doutput_data = [[0.0] for _ in range(prediction.shape[0])]
-        prediction_cpu = prediction.to_cpu()
-
-        for i in range(prediction.shape[0]):
-            doutput_data[i][0] = prediction_cpu[i][0]
-
-        doutput_data[target][0] -= 1.0
-
-        doutput = GPU_matrix(doutput_data)
-
-        return loss_value, doutput
+        if not math.isfinite(float(loss_value)):
+            raise FloatingPointError(
+                "GPU cross-entropy received a non-finite prediction."
+            )
+        return loss_value, GPU_matrix(gradient_gpu, from_gpu=True)
     def embedding_lookup(self, embedding_matrix, token_ids):
         embedding_matrix_gpu = embedding_matrix.to_gpu()
         token_ids_gpu = cuda.to_device(np.array(token_ids, dtype=np.int32))
