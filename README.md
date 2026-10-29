@@ -38,12 +38,6 @@ This raises several questions:
 - Can their outputs be consumed by the downstream inference pipeline, or are compatibility constraints required?
 - If compatibility is necessary, can an interface or transformation mechanism support heterogeneous collections?
 This experiment remains an open research direction. Compatibility between differently shaped collections has not yet been established.
-## Development and AI-Assisted Implementation
-PNSN is my architectural research project. I developed the underlying concept, designed the architecture, directed its implementation, and worked through the decisions required to turn the hypothesis into a functioning system.
-However, **the code was not written entirely by me**.
-When I began implementing PNSN, I used AI assistants to generate substantial portions of the code while I focused on architectural design, reasoning, and implementation direction.
-I want to be transparent about that distinction. The architecture and research direction are mine; the implementation was developed with AI assistance.
-Consequently, the code may contain bugs, implementation errors, inefficiencies, or discrepancies between the intended architecture and its actual behavior.
 Developers are welcome to:
 - Inspect and challenge the implementation.
 - Report bugs or inconsistencies.
